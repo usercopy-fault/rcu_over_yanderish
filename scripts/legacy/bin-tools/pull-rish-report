@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+serial="${ADB_SERIAL:-192.168.50.20:5555}"
+remote="/sdcard/Download/rish-status.txt"
+local_dir="${1:-$HOME/Downloads}"
+
+mkdir -p "$local_dir"
+adb -s "$serial" pull "$remote" "$local_dir/"

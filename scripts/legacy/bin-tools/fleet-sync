@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HUB_ROOT="${FLEET_SYNC_HUB_ROOT:-$HOME/termux-phone_sync}"
+REMOTE_ALIAS="${FLEET_SYNC_REMOTE_ALIAS:-fleet-hub}"
+REMOTE_BASE_DIR="${FLEET_SYNC_REMOTE_BASE_DIR:-~/termux-phone_sync/devices}"
+CONFIG_DIR="${FLEET_SYNC_CONFIG_DIR:-$HOME/.config/fleet-sync}"
+DEVICE_FILE="$CONFIG_DIR/device-name"
+KEEP_SNAPSHOTS="${FLEET_SYNC_KEEP_SNAPSHOTS:-5}"
+STAGING_ROOT="${FLEET_SYNC_STAGING_ROOT:-$HOME/termux-phone_sync_restore}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  fleet-sync register <device-name>
+  fleet-sync name
+  fleet-sync upload
+  fleet-sync download
+  fleet-sync restore
+  fleet-sync status
+EOF
+}
+
+die() {
+  echo "fleet-sync: $*" >&2
+  exit 1
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+valid_device_name() {
+  case "${1:-}" in
+    *[!A-Za-z0-9._-]*|'') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+has_local_device_registration() {
+  [ -f "$DEVICE_FILE" ] && [ -s "$DEVICE_FILE" ]
+}
+
+load_registered_device() {
+  has_local_device_registration || die "device is not registered locally; run: fleet-sync register <device-name>"
+  DEVICE_NAME="$(tr -d '\r\n' <"$DEVICE_FILE")"
+  valid_device_name "$DEVICE_NAME" || die "invalid device name in $DEVICE_FILE"
+  REMOTE_DEVICE_DIR="$REMOTE_BASE_DIR/$DEVICE_NAME"
+  REMOTE_CURRENT_DIR="$REMOTE_DEVICE_DIR/current"
+  REMOTE_SNAPSHOTS_DIR="$REMOTE_DEVICE_DIR/snapshots"
+  LOCAL_STAGE_DIR="$STAGING_ROOT/$DEVICE_NAME"
+}
+
+register_device() {
+  local device_name="$1"
+  valid_device_name "$device_name" || die "invalid device name: $device_name"
+  mkdir -p "$CONFIG_DIR"
+  printf '%s\n' "$device_name" >"$DEVICE_FILE"
+  chmod 600 "$DEVICE_FILE"
+  echo "$device_name"
+}
+
+print_name() {
+  load_registered_device
+  echo "$DEVICE_NAME"
+}
+
+remote_ready() {
+  ssh "$REMOTE_ALIAS" true >/dev/null 2>&1
+}
+
+ensure_remote_layout() {
+  ssh "$REMOTE_ALIAS" "mkdir -p '$REMOTE_CURRENT_DIR' '$REMOTE_SNAPSHOTS_DIR'"
+}
+
+remote_snapshot() {
+  local timestamp
+  timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
+  ssh "$REMOTE_ALIAS" "
+    set -eu
+    mkdir -p '$REMOTE_CURRENT_DIR' '$REMOTE_SNAPSHOTS_DIR'
+    if [ -n \"\$(find '$REMOTE_CURRENT_DIR' -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)\" ]; then
+      mkdir -p '$REMOTE_SNAPSHOTS_DIR/$timestamp'
+      cp -a '$REMOTE_CURRENT_DIR'/.' '$REMOTE_SNAPSHOTS_DIR/$timestamp/' 2>/dev/null || true
+    fi
+    ls -1dt '$REMOTE_SNAPSHOTS_DIR'/* 2>/dev/null | tail -n +$((KEEP_SNAPSHOTS + 1)) | xargs -r rm -rf
+  "
+}
+
+rsync_common_args() {
+  cat <<'EOF'
+-a
+-z
+--delete
+--mkpath
+--exclude=.cache/
+--exclude=.tmp/
+--exclude=tmp/
+--exclude=*.log
+--exclude=*.tmp
+--exclude=*.swp
+--exclude=*~
+--exclude=*.bak
+--exclude=*.bak.*
+--exclude=widget.log
+--exclude=__pycache__/
+EOF
+}
+
+rsync_ssh_args() {
+  cat <<'EOF'
+--exclude=cm/
+--exclude=authorized_keys
+--exclude=id_*
+--exclude=*.pem
+--exclude=known_hosts.old
+--exclude=*.sock
+EOF
+}
+
+upload_dir() {
+  local source_dir="$1"
+  local remote_dir="$2"
+  shift 2
+  [ -d "$source_dir" ] || return 0
+  mapfile -t base_args < <(rsync_common_args)
+  mapfile -t extra_args < <(printf '%s\n' "$@")
+  rsync "${base_args[@]}" "${extra_args[@]}" "$source_dir/" "$REMOTE_ALIAS:$remote_dir/"
+}
+
+upload_file() {
+  local source_file="$1"
+  local remote_file="$2"
+  [ -f "$source_file" ] || return 0
+  scp -q "$source_file" "$REMOTE_ALIAS:$remote_file"
+}
+
+upload() {
+  load_registered_device
+  require_cmd rsync
+  require_cmd ssh
+  ensure_remote_layout
+  remote_snapshot
+  upload_dir "$HOME/.shortcuts" "$REMOTE_CURRENT_DIR/.shortcuts"
+  upload_dir "$HOME/.termux" "$REMOTE_CURRENT_DIR/.termux"
+  upload_dir "$HOME/bin" "$REMOTE_CURRENT_DIR/bin"
+  if [ -d "$HOME/.ssh" ]; then
+    mapfile -t ssh_args < <(rsync_ssh_args)
+    upload_dir "$HOME/.ssh" "$REMOTE_CURRENT_DIR/.ssh" "${ssh_args[@]}"
+  fi
+  upload_file "$HOME/.bashrc" "$REMOTE_CURRENT_DIR/.bashrc"
+  upload_file "$HOME/.zshrc" "$REMOTE_CURRENT_DIR/.zshrc"
+  upload_file "$HOME/.profile" "$REMOTE_CURRENT_DIR/.profile"
+  echo "$REMOTE_ALIAS:$REMOTE_CURRENT_DIR"
+}
+
+download() {
+  load_registered_device
+  require_cmd rsync
+  mkdir -p "$LOCAL_STAGE_DIR"
+  rsync -az --delete "$REMOTE_ALIAS:$REMOTE_CURRENT_DIR/" "$LOCAL_STAGE_DIR/"
+  echo "$LOCAL_STAGE_DIR"
+}
+
+restore_file_if_present() {
+  local src="$1"
+  local dst="$2"
+  [ -f "$src" ] || return 0
+  cp -f "$src" "$dst"
+}
+
+restore_dir_if_present() {
+  local src="$1"
+  local dst="$2"
+  [ -d "$src" ] || return 0
+  mkdir -p "$dst"
+  rsync -a "$src/" "$dst/"
+}
+
+restore_from_stage() {
+  restore_dir_if_present "$LOCAL_STAGE_DIR/.shortcuts" "$HOME/.shortcuts"
+  restore_dir_if_present "$LOCAL_STAGE_DIR/.termux" "$HOME/.termux"
+  restore_dir_if_present "$LOCAL_STAGE_DIR/bin" "$HOME/bin"
+  restore_dir_if_present "$LOCAL_STAGE_DIR/.ssh" "$HOME/.ssh"
+  restore_file_if_present "$LOCAL_STAGE_DIR/.bashrc" "$HOME/.bashrc"
+  restore_file_if_present "$LOCAL_STAGE_DIR/.zshrc" "$HOME/.zshrc"
+  restore_file_if_present "$LOCAL_STAGE_DIR/.profile" "$HOME/.profile"
+  if [ -d "$HOME/.ssh" ]; then
+    chmod 700 "$HOME/.ssh" 2>/dev/null || true
+    find "$HOME/.ssh" -type f -exec chmod 600 {} + 2>/dev/null || true
+  fi
+  find "$HOME/.shortcuts" -type f -exec chmod +x {} + 2>/dev/null || true
+  find "$HOME/bin" -type f -exec chmod +x {} + 2>/dev/null || true
+  command -v termux-reload-settings >/dev/null 2>&1 && termux-reload-settings >/dev/null 2>&1 || true
+}
+
+restore() {
+  load_registered_device
+  [ -d "$LOCAL_STAGE_DIR" ] || download >/dev/null
+  restore_from_stage
+  echo "$DEVICE_NAME"
+}
+
+hub_status() {
+  local devices_dir="$HUB_ROOT/devices"
+  local repos_dir="$HUB_ROOT/repos"
+  [ -d "$devices_dir" ] || die "no local device registration and no hub devices directory found"
+  printf '%-12s %-8s %-10s %-6s %s\n' "DEVICE" "CURRENT" "SNAPSHOTS" "REPO" "NOTES"
+  printf '%-12s %-8s %-10s %-6s %s\n' "------" "-------" "---------" "----" "-----"
+  for device_dir in "$devices_dir"/*; do
+    [ -d "$device_dir" ] || continue
+    local name current_state snapshot_count repo_state notes
+    name="$(basename "$device_dir")"
+    current_state="missing"
+    [ -d "$device_dir/current" ] && current_state="present"
+    snapshot_count="0"
+    [ -d "$device_dir/snapshots" ] && snapshot_count="$(find "$device_dir/snapshots" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+    repo_state="no"
+    [ -d "$repos_dir/$name/.git" ] && repo_state="git"
+    notes=""
+    [ -f "$device_dir/device.env" ] && notes="$(awk -F= '/^TAILSCALE_IP=/{print $2}' "$device_dir/device.env")"
+    printf '%-12s %-8s %-10s %-6s %s\n' "$name" "$current_state" "$snapshot_count" "$repo_state" "$notes"
+  done
+}
+
+remote_status() {
+  load_registered_device
+  echo "device=$DEVICE_NAME"
+  echo "remote=$REMOTE_ALIAS"
+  ssh "$REMOTE_ALIAS" "
+    set -eu
+    echo 'current:'
+    if [ -d '$REMOTE_CURRENT_DIR' ]; then
+      find '$REMOTE_CURRENT_DIR' -maxdepth 2 | sort
+    else
+      echo 'missing'
+    fi
+    echo
+    echo 'snapshots:'
+    if [ -d '$REMOTE_SNAPSHOTS_DIR' ]; then
+      ls -1dt '$REMOTE_SNAPSHOTS_DIR'/* 2>/dev/null | head -n 10 || true
+    else
+      echo 'missing'
+    fi
+  "
+}
+
+status() {
+  if has_local_device_registration; then
+    remote_status
+  else
+    hub_status
+  fi
+}
+
+mkdir -p "$CONFIG_DIR"
+
+case "${1:-}" in
+  register)
+    [ "$#" -eq 2 ] || { usage; exit 1; }
+    register_device "$2"
+    ;;
+  name)
+    [ "$#" -eq 1 ] || { usage; exit 1; }
+    print_name
+    ;;
+  upload)
+    [ "$#" -eq 1 ] || { usage; exit 1; }
+    upload
+    ;;
+  download)
+    [ "$#" -eq 1 ] || { usage; exit 1; }
+    download
+    ;;
+  restore)
+    [ "$#" -eq 1 ] || { usage; exit 1; }
+    restore
+    ;;
+  status)
+    [ "$#" -eq 1 ] || { usage; exit 1; }
+    status
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

