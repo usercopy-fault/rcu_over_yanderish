@@ -38,4 +38,4 @@ find . -maxdepth 2 -type d | sort
 ```
 
 ## Author
-SnakeBoot-Andrw (SBAnd)
+Kansas
